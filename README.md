@@ -262,5 +262,6 @@ int run_mask_tests(void);
 * **Negativzahlen** und Vorzeichen‑Parsing/Formatting.
 * **Masken‑Validator** (Compile‑Time/Init‑Check gegen Typ/MaxLen).
 * **Neue Feldtypen**.
+* **Integration komplexerer Masken**.
 
 ---

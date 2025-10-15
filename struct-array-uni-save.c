@@ -77,6 +77,9 @@ struct FieldBinding {
 
 char currentFilename[_MAX_PATH]="\0";
 
+int buffer_to_int(const char *buf, const char *mask, int maxLen, int *outVal);
+int buffer_to_double(const char *buf, const char *mask, int maxLen, double *outVal);
+int buffer_to_str(const char *buf, const char *mask, int maxLen, char *outStr, int outSize);
 
 
 //Rechnen die Abmessungen der Elemente aus
@@ -268,7 +271,7 @@ void DrawFooter(const void *data, size_t itemSize,
         totalWidth+=w+3;
     }
     gotoxy(form->StartX+1, form->Height + 3);
-    // trennlinie (einfach laenger als noetig)
+    // trennlinie
     for (int k=0; k<totalWidth; k++) putchar('=');
     if (data != NULL && first <= last) {
         // zeilen
@@ -332,18 +335,166 @@ void DrawFooter(const void *data, size_t itemSize,
 
 }
 
-/*void redraw(const struct FormDef *form,
-                   struct Product *catalog, int catalogCount,
-                   struct FieldBinding *prodBinds, int fieldCount,
-                   int catalogIndex, int listTop, int pageSize)
+void DrawFiltered(const void *data, size_t itemSize, int recordCount,
+                  struct FormDef *form, const struct FieldBinding *binds, int bindCount)
 {
-    int first = listTop;
-    int last  = (catalogCount > 0) ? (listTop + pageSize - 1) : -1;
-    if (last > catalogCount - 1) last = catalogCount - 1;
+    // totalWidth: Breite der Tabelle fuer Kopf- und Trennzeilen
+    int totalWidth = 2;
 
-    DrawFooter(catalog, sizeof(struct Product), (struct FormDef*)form, prodBinds, fieldCount, catalogIndex, first, last, catalogCount);
-    DrawForm(form);
-}*/
+    system("cls");
+    printf(COLOR_CYAN "FILTERERGEBNISSE\n\n" COLOR_RESET);
+
+    // kopfzeile
+    printf(" #");
+    for (int b=0; b<bindCount; b++){
+        const struct FieldDef *f = &form->Fields[binds[b].fieldIndex];
+        int w = f->MaxLen;
+        const char *t = f->Title;
+        int tl = (int)strlen(t); //Title lenght
+        
+        // von hinten alle Leerzeichen und Doppelpunkte entfernen
+        while (tl > 0 && (t[tl - 1] == ':' || t[tl - 1] == ' ')) {
+              tl--;
+        }
+        printf(" | %*.*s", w, tl, t); // rechtsbuendig
+        totalWidth+=w+3;
+    }
+    printf("\n");
+
+    // --- Trennlinie ---
+    for (int k = 0; k < totalWidth; k++) putchar('=');
+    printf("\n");
+    
+    int hitCount = 0; // Anzahl der gedruckten Treffer
+
+    // alle Datensaetze pruefen
+    for (int i = 0; i < recordCount; i++) {
+        // recordPtr: Zeiger auf aktuellen Datensatz
+        const char *recordPtr = (const char *)data + (size_t)i * itemSize;
+
+        // rowMatches: bleibt 1, solange alle aktiven Filter passen
+        int rowMatches = 1;
+
+        // alle Bindings als potentielle Filter interpretieren
+        for (int b = 0; b < bindCount && rowMatches; b++) {
+            const struct FieldBinding *fieldBinding = &binds[b];
+            const struct FieldDef *fieldDef = &form->Fields[fieldBinding->fieldIndex];
+
+            // dataPtr: Feldinhalt im Datensatz (via Offset)
+            const char *dataPtr = recordPtr + fieldBinding->destOffset;
+
+            // filterRaw: Benutzer-Eingabe fuer dieses Feld (roh, gemaess Maske extrahiert)
+            char filterRaw[256];
+            if (!buffer_to_str(fieldDef->Buffer, fieldDef->Mask, fieldDef->MaxLen, filterRaw, (int)sizeof(filterRaw))) {
+                // Parsing fehlgeschlagen -> kein Filter fuer dieses Feld anwenden
+                continue;
+            }
+            if (filterRaw[0] == '\0') {
+                // leeres Filterfeld -> kein Filter fuer dieses Feld
+                continue;
+            }
+
+            if (fieldBinding->destType == FT_STR) {
+                // String: Teilstring, case-insensitive
+                char recordStr[512];
+                char filterStr[512];
+
+                // Feldwert aus Datensatz
+                strncpy(recordStr, (const char *)dataPtr, sizeof(recordStr) - 1);
+                recordStr[sizeof(recordStr) - 1] = '\0';
+
+                // Filtertext aus Eingabe
+                strncpy(filterStr, filterRaw, sizeof(filterStr) - 1);
+                filterStr[sizeof(filterStr) - 1] = '\0';
+
+                // beide Seiten klein schreiben
+                strlwr(recordStr);
+                strlwr(filterStr);
+
+                if (!strstr(recordStr, filterStr)) {
+                    rowMatches = 0; // Teilstring nicht enthalten
+                }
+
+            } else if (fieldBinding->destType == FT_INT) {
+                // Integer: exakte Gleichheit
+                int filterInt = 0;
+                if (!buffer_to_int(fieldDef->Buffer, fieldDef->Mask, fieldDef->MaxLen, &filterInt)) {
+                    rowMatches = 0; // ungueltiger Filter
+                    break;
+                }
+                //int dataInt = *(const int *)dataPtr;
+                int dataInt = 0;
+                memcpy(&dataInt, dataPtr, sizeof dataInt);
+                if (dataInt != filterInt) {
+                    rowMatches = 0;
+                }
+
+            } else if (fieldBinding->destType == FT_DBL) {
+                // Double: Gleichheit nach Masken-Praezision (runden/skalieren)
+                double filterDouble = 0.0;
+                if (!buffer_to_double(fieldDef->Buffer, fieldDef->Mask, fieldDef->MaxLen, &filterDouble)) {
+                    rowMatches = 0; // ungueltiger Filter
+                    break;
+                }
+                //double dataDouble = *(const double *)dataPtr;
+                double dataDouble = 0.0;
+                memcpy(&dataDouble, dataPtr, sizeof dataDouble);
+
+                int precision = frac_precision(fieldDef->Mask); // Anzahl Nachkommastellen
+                double scale = 1.0;
+                for (int s = 0; s < precision; ++s) scale *= 10.0;
+
+                long long roundedFilter = (long long)(filterDouble * scale + (filterDouble >= 0 ? 0.5 : -0.5));
+                long long roundedData   = (long long)(dataDouble   * scale + (dataDouble   >= 0 ? 0.5 : -0.5));
+
+                if (roundedData != roundedFilter) {
+                    rowMatches = 0;
+                }
+            }
+        }
+
+        if (!rowMatches) continue;
+
+        // --- Zeile drucken, wenn Filter passen ---
+        printf("%2d", i);
+        for (int b = 0; b < bindCount; ++b) {
+            const struct FieldBinding *fieldBinding = &binds[b];
+            const struct FieldDef *fieldDef = &form->Fields[fieldBinding->fieldIndex];
+            const char *dataPtr = recordPtr + fieldBinding->destOffset;
+
+            int columnWidth = fieldDef->MaxLen;
+            printf(" | ");
+
+            if (fieldBinding->destType == FT_STR) {
+                printf("%*s", columnWidth, (const char *)dataPtr);
+            } else if (fieldBinding->destType == FT_INT) {
+                printf("%*d", columnWidth, *(const int *)dataPtr);
+            } else if (fieldBinding->destType == FT_DBL) {
+                int precision = frac_precision(fieldDef->Mask);
+                char fmt[32];
+                snprintf(fmt, sizeof(fmt), "%%%d.%df", columnWidth, precision);
+                printf(fmt, *(const double *)dataPtr);
+            }
+        }
+        printf("\n");
+        hitCount++;
+    }
+
+    // Abschlusslinie und Zusammenfassung
+    for (int k = 0; k < totalWidth; k++) putchar('-');
+    printf("\n");
+
+    if (hitCount == 0) {
+        printf("Keine Ergebnisse gefunden.\n");
+    } else {
+        printf("%d Treffer gefunden.\n", hitCount);
+    }
+
+    printf("\nDruecken Sie eine Taste, um zurueckzukehren...");
+    getch();
+    system("cls");
+}
+
 
 void redraw(const struct FormDef *form,
             struct Product *catalog, int catalogCount,
@@ -367,6 +518,7 @@ void DrawHelp(void) {
      printf(COLOR_MAGENTAB "\nPfeiltasten ^/v" COLOR_RESET ": Zwischen Datensatzen wechseln.");
      printf(COLOR_MAGENTAB "\nPos1 (Home)" COLOR_RESET ": Zum ersten Eintrag springen.");
      printf(COLOR_MAGENTAB "\nEnde" COLOR_RESET ": Zum letzten Eintrag springen.");
+     printf(COLOR_MAGENTAB "\nCtrl+F" COLOR_RESET ": Suche mit Ausgabe basierend auf den Daten in den Eingabefeldern.");
      printf(COLOR_MAGENTAB "\nCtrl+S" COLOR_RESET ": Array in Datei speichern (default.db).");
      printf(COLOR_MAGENTAB "\nCtrl+L" COLOR_RESET ": Array aus Datei laden (default.db).");
      printf(COLOR_GRAY "\nCtrl+N: Neues Array erstellen (noch nicht implementiert)." COLOR_RESET);
@@ -1192,7 +1344,12 @@ int main() {
                getxy(&x,&y);
                DrawHeader(&form);
                gotoxy(x,y);
-        } else if (ch == 2) {
+        } else if (ch == 6) { //Ctrl-F
+               DrawFiltered(catalog, sizeof(struct Product), catalogCount, &form, prodBinds, fieldCount);
+               DrawHeader(&form);
+               redraw(&form, catalog, catalogCount, prodBinds, sizeof(prodBinds)/sizeof(prodBinds[0]), catalogIndex, listTop, pageSize);
+               
+        /*} else if (ch == 2) {
                      short int x,y;
                      getxy(&x,&y);
                      gotoxy(5,27);
@@ -1203,7 +1360,7 @@ int main() {
                      getxy(&x,&y);
                      gotoxy(5,28);
                      printf("CatalogIndex:%d;catalogCount:%d;listTop=%d                   ",catalogIndex,catalogCount, listTop);
-                     gotoxy(x,y);
+                     gotoxy(x,y);*/
         }
     } while (ch!=3);
     
